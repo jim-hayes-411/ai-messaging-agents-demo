@@ -9,10 +9,14 @@
 <body>
   <main class="chat">
     <header class="chat-header">
-      <div class="avatar">A</div>
-      <div>
-        <div class="name">Alex</div>
+      <div class="avatar" id="agent-avatar">?</div>
+      <div class="who">
+        <div class="name" id="agent-name">Assistant</div>
         <div class="status">AI assistant · online</div>
+      </div>
+      <!-- Cart counter: hidden until the first product card appears -->
+      <div class="cart" id="cart" hidden aria-live="polite">
+        🛒 <span id="cart-count">0</span>
       </div>
     </header>
 
