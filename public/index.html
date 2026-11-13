@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Chat with our team</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <main class="chat">
+    <header class="chat-header">
+      <div class="avatar">A</div>
+      <div>
+        <div class="name">Alex</div>
+        <div class="status">AI assistant · online</div>
+      </div>
+    </header>
+
+    <!-- Messages get added here by app.js -->
+    <div id="messages" class="messages" aria-live="polite"></div>
+
+    <form id="chat-form" class="composer">
+      <input id="chat-input" type="text" placeholder="Type a message…" autocomplete="off" maxlength="4000" required />
+      <button type="submit" id="send-btn">Send</button>
+    </form>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>

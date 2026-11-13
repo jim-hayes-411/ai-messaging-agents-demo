@@ -1,0 +1,15 @@
+{
+  "name": "chat-agent",
+  "version": "1.0.0",
+  "description": "Local demo: a web chat window that talks to an AI agent via the Anthropic API",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^1.8.0",
+    "dotenv": "^18.0.10",
+    "express": "^5.3.0"
+  }
+}
