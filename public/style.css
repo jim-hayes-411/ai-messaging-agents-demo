@@ -203,3 +203,32 @@ body {
   cursor: pointer;
 }
 .add-btn:disabled { background: #b8c2cf; cursor: default; }
+
+/* ---------- Front door ---------- */
+.link-btn {
+  border: none;
+  background: none;
+  padding: 4px 2px;
+  color: var(--muted);
+  font-size: 0.8rem;
+  text-decoration: underline;
+  cursor: pointer;
+}
+.link-btn:hover { color: var(--accent); }
+
+.quick-replies {
+  align-self: flex-start;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.quick-reply {
+  padding: 8px 14px;
+  border: 1.5px solid var(--accent);
+  border-radius: 999px;
+  background: var(--panel);
+  color: var(--accent);
+  font-size: 0.95rem;
+  cursor: pointer;
+}
+.quick-reply:hover { background: var(--accent); color: #fff; }

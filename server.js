@@ -111,6 +111,44 @@ function loadAgentPrompt(name) {
   return fs.readFileSync(file, "utf8");
 }
 
+// The front-door paths the browser may send, and how we describe them to the agent.
+const VISITOR_PATHS = {
+  commercial: "the commercial buyer path (buying for a business)",
+  personal: "the shopping-for-myself path (buying for personal use)",
+};
+
+// Accept a name only if it's letters (any language), spaces, hyphens and
+// apostrophes, 40 characters max. Anything else is ignored, not an error.
+function validName(name) {
+  if (typeof name !== "string") return null;
+  const trimmed = name.trim();
+  if (trimmed.length === 0 || trimmed.length > 40) return null;
+  return /^\p{L}[\p{L} '-]*$/u.test(trimmed) ? trimmed : null;
+}
+
+// Add a short note about the visitor to the end of the agent's system prompt.
+function withVisitorNote(systemPrompt, visitor) {
+  const name = validName(visitor?.name);
+  const pathLabel = VISITOR_PATHS[visitor?.path] || null;
+
+  const notes = [];
+  if (name && pathLabel) {
+    notes.push(`The visitor's name is ${name} and they chose ${pathLabel}.`);
+  } else if (name) {
+    notes.push(`The visitor's name is ${name}.`);
+  } else if (pathLabel) {
+    notes.push(`The visitor chose ${pathLabel}.`);
+  }
+  if (name) {
+    notes.push("Greet them by name, then use it naturally now and then, like a person would, not in every message.");
+  }
+  if (pathLabel) {
+    notes.push("They already told us this, so don't ask whether they're buying for a business or for themselves.");
+  }
+
+  return notes.length ? `${systemPrompt.trimEnd()}\n\nAbout this visitor:\n${notes.join(" ")}` : systemPrompt;
+}
+
 // Check that the history from the browser has the shape the API expects.
 function isValidHistory(messages) {
   return (
@@ -142,10 +180,11 @@ app.get("/api/agents", (req, res) => {
 });
 
 app.post("/api/chat", async (req, res) => {
-  const { messages: history, agent = DEFAULT_AGENT } = req.body || {};
+  const { messages: history, agent = DEFAULT_AGENT, visitor } = req.body || {};
 
-  const systemPrompt = loadAgentPrompt(agent);
-  if (!systemPrompt) return res.status(400).json({ error: `Unknown agent: ${agent}` });
+  const agentPrompt = loadAgentPrompt(agent);
+  if (!agentPrompt) return res.status(400).json({ error: `Unknown agent: ${agent}` });
+  const systemPrompt = withVisitorNote(agentPrompt, visitor);
   if (!isValidHistory(history)) return res.status(400).json({ error: "Invalid message history." });
 
   const settings = AGENT_SETTINGS[agent] || DEFAULT_SETTINGS;
