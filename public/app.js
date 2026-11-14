@@ -61,7 +61,7 @@ let stage = "name"; // "name" → "path" → "agent"
 let agent = null; // which agent we're talking to, once routed
 let visitor = { name: null, path: null };
 let history = []; // the agent conversation, sent to the server each time
-let cart = []; // items added: { id, name, price, category, role: "main" | "addon" | null }
+let cart = []; // items added, in order: { id, name, price, category, addedAfterTv, role }
 let profile = {}; // shopper-profile fields Nova has saved so far
 let conversationId = 0; // bumps on Start over so late replies from an old chat are ignored
 
@@ -130,9 +130,11 @@ function cleanName(raw) {
     .replace(/[’‘]/g, "'") // curly apostrophes → plain (O’Brien → O'Brien)
     .replace(/\s+/g, " "); // collapse repeated spaces
 
-  // Accept friendly answers like "I'm Sam" or "my name is Sam".
-  s = s.replace(/^(my name is|my name's|name's|i am|i'm|im|it's|its|this is|call me)\s+/i, "");
-  s = s.replace(/[.!]+$/, ""); // drop trailing "." or "!"
+  // Accept friendly answers like "Hi, I'm Sam", "my name is Sam" or "Sam here, thanks!".
+  s = s.replace(/^(hi|hey|hello|hiya|howdy)\b[\s,!.]*/i, ""); // leading greeting
+  s = s.replace(/^(my name is|my name's|name's|name is|i am|i'm|im|it's|its|this is|call me)\s+/i, "");
+  s = s.split(/[,.!?;]/)[0].trim(); // keep only the part before any punctuation
+  s = s.replace(/\s+here$/i, ""); // "Sam here"
   s = s.slice(0, 40).trim();
 
   if (!s) return null;
@@ -213,20 +215,43 @@ function keySpecs(p) {
   }
 }
 
-function addToCart(button, product) {
-  // The first TV is the main item. Accessories added once a TV is in the cart are add-ons.
+// Work out each cart item's role:
+//   main:  the first TV still in the cart
+//   addon: a soundbar, mount, cable or streaming device that was added while a TV
+//          was already in the cart, as long as there's still a TV in the cart
+function assignRoles() {
   const hasTv = cart.some((item) => item.category === "tv");
-  let role = null;
-  if (product.category === "tv" && !cart.some((item) => item.role === "main")) role = "main";
-  else if (hasTv && ADDON_CATEGORIES.has(product.category)) role = "addon";
+  let mainFound = false;
+  for (const item of cart) {
+    item.role = null;
+    if (item.category === "tv" && !mainFound) {
+      item.role = "main";
+      mainFound = true;
+    } else if (hasTv && item.addedAfterTv && ADDON_CATEGORIES.has(item.category)) {
+      item.role = "addon";
+    }
+  }
+}
 
-  cart.push({ id: product.id, name: product.name, price: product.price, category: product.category, role });
-  renderCart(cart.length - 1);
-
+// Update the header cart counter with a little "bump".
+function updateCartCount() {
   cartCountEl.textContent = cart.length;
   cartEl.classList.remove("bump");
-  void cartEl.offsetWidth; // restart the little "bump" animation
+  void cartEl.offsetWidth; // restart the animation
   cartEl.classList.add("bump");
+}
+
+function addToCart(button, product) {
+  cart.push({
+    id: product.id,
+    name: product.name,
+    price: product.price,
+    category: product.category,
+    addedAfterTv: cart.some((item) => item.category === "tv"),
+  });
+  assignRoles();
+  renderCart(cart.length - 1);
+  updateCartCount();
   button.textContent = "Added ✓";
   setTimeout(() => (button.textContent = "Add to cart"), 1200);
 }
@@ -273,7 +298,8 @@ async function sendToAgent() {
     const res = await fetch("/api/chat", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ agent, visitor, messages: history }),
+      // The cart goes along as a list of product ids so the agent knows what's in it.
+      body: JSON.stringify({ agent, visitor, messages: history, cart: cart.map((item) => item.id) }),
     });
     const data = await res.json();
     if (myConversation !== conversationId) return; // visitor clicked Start over meanwhile
@@ -285,6 +311,7 @@ async function sendToAgent() {
     addBubble(data.reply, "assistant");
     addProductCards(data.products);
     applyProfileUpdates(data.profile_updates);
+    applyCartRemovals(data.cart_removals);
   } catch (err) {
     if (myConversation !== conversationId) return;
     typing.remove();
@@ -334,6 +361,12 @@ function renderProfile(changed = []) {
 function applyProfileUpdates(updates) {
   if (!updates || typeof updates !== "object") return;
   const changed = [];
+  // A name Nova picked up in conversation (e.g. the front door was skipped).
+  // It also goes back to the server with later messages.
+  if (typeof updates.name === "string" && updates.name && updates.name !== visitor.name) {
+    visitor.name = updates.name;
+    changed.push("name");
+  }
   for (const [key] of PROFILE_FIELDS) {
     const value = updates[key];
     if (typeof value === "string" && value && profile[key] !== value) {
@@ -342,6 +375,25 @@ function applyProfileUpdates(updates) {
     }
   }
   if (changed.length) renderProfile(changed);
+}
+
+// Take out the items Nova removed: { id: quantity }. The most recently added copies go first.
+function applyCartRemovals(removals) {
+  if (!removals || typeof removals !== "object") return;
+  let removedAny = false;
+  for (const [id, qty] of Object.entries(removals)) {
+    for (let n = 0; n < qty; n++) {
+      const i = cart.findLastIndex((item) => item.id === id);
+      if (i === -1) break;
+      cart.splice(i, 1);
+      removedAny = true;
+    }
+  }
+  if (!removedAny) return;
+  assignRoles();
+  renderCart();
+  flash(cartTotalEl.parentElement); // highlight the new total
+  updateCartCount();
 }
 
 // Redraw the cart list, total and add-on line. `newIndex` is the item to flash.

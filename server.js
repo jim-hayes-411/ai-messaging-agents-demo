@@ -2,7 +2,8 @@
 // It does two jobs:
 //   1. Serves the chat web page (the files in /public)
 //   2. Handles POST /api/chat: runs the conversation with Claude (including any
-//      tool calls) and returns { reply, products, profile_updates } to the browser
+//      tool calls) and returns { reply, products, profile_updates, cart_removals }
+//      to the browser
 
 import "dotenv/config"; // loads variables from .env into process.env
 import express from "express";
@@ -82,6 +83,7 @@ const PRODUCT_TOOLS = [
     input_schema: {
       type: "object",
       properties: {
+        name: { type: "string", description: "The shopper's first name, only if they tell you it" },
         room: { type: "string", description: "Which room, e.g. 'living room', 'bedroom'" },
         lighting: { type: "string", enum: ["bright", "dim", "mixed"], description: "How bright the room is" },
         main_use: { type: "string", description: "What they'll mostly watch or do, e.g. 'sports and gaming'" },
@@ -91,6 +93,21 @@ const PRODUCT_TOOLS = [
         viewing_distance: { type: "string", description: "How far they sit from the screen, e.g. '10 ft'" },
         notes: { type: "string", description: "Anything else worth remembering, e.g. 'has a PS5'" },
       },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "remove_from_cart",
+    description:
+      "Remove an item from the shopper's cart, e.g. when they say they added something by mistake or changed their mind. " +
+      "Only items listed in the current cart can be removed. If it's unclear which item they mean, ask before removing.",
+    input_schema: {
+      type: "object",
+      properties: {
+        product_id: { type: "string", description: "Catalog id of the item to remove, from the current cart" },
+        quantity: { type: "integer", minimum: 1, description: "How many to remove (default 1)" },
+      },
+      required: ["product_id"],
       additionalProperties: false,
     },
   },
@@ -111,20 +128,58 @@ function cleanProfileUpdates(input) {
     if (PROFILE_CHOICES[field] && !PROFILE_CHOICES[field].includes(trimmed)) continue;
     updates[field] = trimmed;
   }
+  const name = validName(input?.name);
+  if (name) updates.name = name;
   return updates;
+}
+
+// The cart the browser sent: a list of catalog ids in the order they were added
+// (repeats allowed). Unknown ids are dropped. Returns { id: count }.
+function cartCounts(cart) {
+  const counts = {};
+  if (!Array.isArray(cart)) return counts;
+  for (const id of cart.slice(0, 50)) {
+    if (typeof id !== "string") continue;
+    if (getProductsByIds([id]).found.length) counts[id] = (counts[id] || 0) + 1;
+  }
+  return counts;
+}
+
+// Describe the cart for the agent's system prompt, one line per product.
+function cartNote(counts) {
+  const ids = Object.keys(counts);
+  if (ids.length === 0) return "The shopper's cart is empty.";
+  const { found } = getProductsByIds(ids);
+  const lines = found.map((p) => `- ${p.id}: ${p.name}, $${p.price}${counts[p.id] > 1 ? ` (quantity ${counts[p.id]})` : ""}`);
+  return `The shopper's cart right now (they add items with the buttons on the product cards):\n${lines.join("\n")}`;
 }
 
 // Per-agent settings. Agents not listed here chat without tools.
 const AGENT_SETTINGS = {
-  "product-advisor": { tools: PRODUCT_TOOLS, effort: "medium" }, // a bit more thought for tool use
+  // A bit more thought for tool use; `cart: true` shows the agent the shopper's cart.
+  "product-advisor": { tools: PRODUCT_TOOLS, effort: "medium", cart: true },
 };
 const DEFAULT_SETTINGS = { tools: null, effort: "low" }; // quick, chatty replies
 
 // Run one tool call. Returns the text to send back to Claude. Products to show
-// are added to `out.cards` (card data always comes from the catalog itself), and
-// shopper-profile changes are merged into `out.profile` (latest value wins).
+// are added to `out.cards` (card data always comes from the catalog itself),
+// shopper-profile changes are merged into `out.profile` (latest value wins), and
+// removals are counted in `out.removals` and taken off `out.cart`, so the same
+// item can't be removed more times than it's in the cart.
 function runTool(name, input, out) {
-  const { cards, profile } = out;
+  const { cards, profile, cart, removals } = out;
+  if (name === "remove_from_cart") {
+    const id = String(input?.product_id ?? "");
+    const inCart = cart[id] || 0;
+    if (inCart === 0) {
+      return { content: JSON.stringify({ error: `${id} is not in the cart`, cart: cart }), is_error: true };
+    }
+    const qty = Math.min(Number.isInteger(input?.quantity) && input.quantity > 0 ? input.quantity : 1, inCart);
+    cart[id] = inCart - qty;
+    if (cart[id] === 0) delete cart[id];
+    removals[id] = (removals[id] || 0) + qty;
+    return { content: JSON.stringify({ removed: id, quantity: qty, remaining_in_cart: cart }) };
+  }
   if (name === "update_shopper_profile") {
     const updates = cleanProfileUpdates(input);
     Object.assign(profile, updates);
@@ -226,18 +281,23 @@ app.get("/api/agents", (req, res) => {
 });
 
 app.post("/api/chat", async (req, res) => {
-  const { messages: history, agent = DEFAULT_AGENT, visitor } = req.body || {};
+  const { messages: history, agent = DEFAULT_AGENT, visitor, cart: cartIds } = req.body || {};
 
   const agentPrompt = loadAgentPrompt(agent);
   if (!agentPrompt) return res.status(400).json({ error: `Unknown agent: ${agent}` });
-  const systemPrompt = withVisitorNote(agentPrompt, visitor);
   if (!isValidHistory(history)) return res.status(400).json({ error: "Invalid message history." });
 
   const settings = AGENT_SETTINGS[agent] || DEFAULT_SETTINGS;
+  const cart = cartCounts(cartIds); // { id: count }; remove_from_cart updates it as it goes
+  let systemPrompt = withVisitorNote(agentPrompt, visitor);
+  if (settings.cart) systemPrompt += `\n\n${cartNote(cart)}`;
   // Copy the browser's history; tool calls and results get appended to this copy.
   const messages = history.map((m) => ({ role: m.role, content: m.content }));
   const cards = [];
   const profile = {}; // shopper-profile fields Claude saved during this message
+  const removals = {}; // { id: quantity } Claude removed from the cart during this message
+  // Everything the browser gets back, apart from the reply text.
+  const extras = () => ({ products: cards, profile_updates: profile, cart_removals: removals });
 
   try {
     // The tool-use loop: ask Claude; if it wants tools, run them, send the
@@ -259,8 +319,8 @@ app.post("/api/chat", async (req, res) => {
       if (response.stop_reason === "refusal") {
         return res.json({
           reply: "Sorry, I can't help with that. Is there something else I can do for you?",
+          ...extras(),
           products: [],
-          profile_updates: profile,
         });
       }
 
@@ -271,7 +331,7 @@ app.post("/api/chat", async (req, res) => {
           .map((block) => block.text)
           .join("")
           .trim();
-        return res.json({ reply: reply || "Here's what I found.", products: cards, profile_updates: profile });
+        return res.json({ reply: reply || "Here's what I found.", ...extras() });
       }
 
       // Claude asked for tools. Add its turn to the conversation unchanged,
@@ -280,7 +340,7 @@ app.post("/api/chat", async (req, res) => {
       const toolResults = response.content
         .filter((block) => block.type === "tool_use")
         .map((block) => {
-          const result = runTool(block.name, block.input, { cards, profile });
+          const result = runTool(block.name, block.input, { cards, profile, cart, removals });
           console.log(`[${agent}] tool ${block.name}`, JSON.stringify(block.input));
           return { type: "tool_result", tool_use_id: block.id, ...result };
         });
@@ -288,7 +348,7 @@ app.post("/api/chat", async (req, res) => {
     }
 
     console.error(`[${agent}] stopped after ${MAX_TOOL_ROUNDS} tool rounds`);
-    res.json({ reply: "Sorry, I got a bit tangled up there. Could you rephrase that?", products: cards, profile_updates: profile });
+    res.json({ reply: "Sorry, I got a bit tangled up there. Could you rephrase that?", ...extras() });
   } catch (err) {
     // Log details on the server only; don't leak internals to the browser.
     if (err instanceof Anthropic.AuthenticationError) {
