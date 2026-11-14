@@ -7,6 +7,7 @@
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
+  <div class="layout">
   <main class="chat">
     <header class="chat-header">
       <div class="avatar" id="agent-avatar">W</div>
@@ -18,7 +19,15 @@
       <div class="cart" id="cart" hidden aria-live="polite">
         🛒 <span id="cart-count">0</span>
       </div>
-      <button type="button" class="link-btn" id="start-over">Start over</button>
+      <div class="header-actions">
+        <!-- Shows or hides the Shopper Profile panel (only while Nova is active) -->
+        <label class="bts-toggle" id="bts-toggle" hidden>
+          <input type="checkbox" id="bts-checkbox" checked />
+          <span class="switch" aria-hidden="true"></span>
+          Behind the scenes
+        </label>
+        <button type="button" class="link-btn" id="start-over">Start over</button>
+      </div>
     </header>
 
     <!-- Messages get added here by app.js -->
@@ -29,6 +38,21 @@
       <button type="submit" id="send-btn">Send</button>
     </form>
   </main>
+
+    <!-- Behind-the-scenes panel: filled in by app.js, shown only for the product advisor -->
+    <aside class="panel" id="panel" hidden aria-label="Behind the scenes">
+      <section class="panel-section">
+        <h2>Shopper Profile</h2>
+        <dl class="profile" id="profile"></dl>
+      </section>
+      <section class="panel-section">
+        <h2>Cart</h2>
+        <ul class="cart-list" id="cart-list"></ul>
+        <div class="cart-total"><span>Total</span><span id="cart-total">$0</span></div>
+        <div class="addon-line" id="addon-line">Add-ons: +$0 (0% of order)</div>
+      </section>
+    </aside>
+  </div>
 
   <script src="app.js"></script>
 </body>

@@ -18,6 +18,24 @@ const PATHS = [
   { label: "Shopping for myself", agent: "product-advisor", path: "personal" },
 ];
 
+// The behind-the-scenes panel is only for the product advisor.
+const PANEL_AGENT = "product-advisor";
+
+// Shopper-profile fields (same names the server's update_shopper_profile tool uses) and their labels.
+const PROFILE_FIELDS = [
+  ["room", "Room"],
+  ["lighting", "Lighting"],
+  ["main_use", "Main use"],
+  ["budget", "Budget"],
+  ["setup", "Setup"],
+  ["current_sound", "Current sound"],
+  ["viewing_distance", "Viewing distance"],
+  ["notes", "Notes"],
+];
+
+// Categories that count as add-ons when added after a TV is already in the cart.
+const ADDON_CATEGORIES = new Set(["soundbar", "mount", "cable", "streaming"]);
+
 // Shortcut: /?agent=product-advisor skips the front door.
 const URL_AGENT = new URLSearchParams(location.search).get("agent");
 
@@ -30,13 +48,21 @@ const cartCountEl = document.getElementById("cart-count");
 const nameEl = document.getElementById("agent-name");
 const avatarEl = document.getElementById("agent-avatar");
 const statusEl = document.getElementById("agent-status");
+const panelEl = document.getElementById("panel");
+const profileEl = document.getElementById("profile");
+const cartListEl = document.getElementById("cart-list");
+const cartTotalEl = document.getElementById("cart-total");
+const addonLineEl = document.getElementById("addon-line");
+const btsToggleEl = document.getElementById("bts-toggle");
+const btsCheckbox = document.getElementById("bts-checkbox");
 
 // ---- Conversation state (all reset by "Start over") ----
 let stage = "name"; // "name" → "path" → "agent"
 let agent = null; // which agent we're talking to, once routed
 let visitor = { name: null, path: null };
 let history = []; // the agent conversation, sent to the server each time
-let cartCount = 0;
+let cart = []; // items added: { id, name, price, category, role: "main" | "addon" | null }
+let profile = {}; // shopper-profile fields Nova has saved so far
 let conversationId = 0; // bumps on Start over so late replies from an old chat are ignored
 
 // ---------------------------------------------------------------------------
@@ -161,6 +187,7 @@ function startAgent(agentId) {
   stage = "agent";
   agent = agentId;
   setHeader(AGENT_NAMES[agent] || "Assistant", "AI assistant · online");
+  renderPanel();
   // The API needs a user message to start, so we send a hidden one;
   // the agent replies with its greeting.
   history.push({ role: "user", content: "Hi!" });
@@ -186,9 +213,17 @@ function keySpecs(p) {
   }
 }
 
-function addToCart(button) {
-  cartCount++;
-  cartCountEl.textContent = cartCount;
+function addToCart(button, product) {
+  // The first TV is the main item. Accessories added once a TV is in the cart are add-ons.
+  const hasTv = cart.some((item) => item.category === "tv");
+  let role = null;
+  if (product.category === "tv" && !cart.some((item) => item.role === "main")) role = "main";
+  else if (hasTv && ADDON_CATEGORIES.has(product.category)) role = "addon";
+
+  cart.push({ id: product.id, name: product.name, price: product.price, category: product.category, role });
+  renderCart(cart.length - 1);
+
+  cartCountEl.textContent = cart.length;
   cartEl.classList.remove("bump");
   void cartEl.offsetWidth; // restart the little "bump" animation
   cartEl.classList.add("bump");
@@ -221,7 +256,7 @@ function addProductCards(products) {
     const btn = el("button", "add-btn", p.in_stock ? "Add to cart" : "Unavailable");
     btn.type = "button";
     btn.disabled = !p.in_stock;
-    btn.addEventListener("click", () => addToCart(btn));
+    btn.addEventListener("click", () => addToCart(btn, p));
     card.append(btn);
 
     wrap.append(card);
@@ -249,6 +284,7 @@ async function sendToAgent() {
     history.push({ role: "assistant", content: data.reply });
     addBubble(data.reply, "assistant");
     addProductCards(data.products);
+    applyProfileUpdates(data.profile_updates);
   } catch (err) {
     if (myConversation !== conversationId) return;
     typing.remove();
@@ -257,6 +293,78 @@ async function sendToAgent() {
   } finally {
     if (myConversation === conversationId) setInputEnabled(true);
   }
+}
+
+// ---------------------------------------------------------------------------
+// Behind-the-scenes panel: Shopper Profile + Cart
+// ---------------------------------------------------------------------------
+
+function money(n) {
+  return "$" + n.toLocaleString(undefined, { maximumFractionDigits: 2 });
+}
+
+// Briefly highlight an element with a soft background flash.
+function flash(node) {
+  node.classList.remove("flash");
+  void node.offsetWidth; // restart the animation if it's already running
+  node.classList.add("flash");
+}
+
+// Show the panel (and its header toggle) only while the product advisor is active.
+function renderPanel() {
+  const isAdvisor = agent === PANEL_AGENT;
+  btsToggleEl.hidden = !isAdvisor;
+  panelEl.hidden = !(isAdvisor && btsCheckbox.checked);
+  if (isAdvisor) renderProfile();
+}
+
+// Redraw every profile row. `changed` lists the fields to flash.
+function renderProfile(changed = []) {
+  const rows = [["name", "Name", visitor.name], ...PROFILE_FIELDS.map(([key, label]) => [key, label, profile[key]])];
+  profileEl.replaceChildren();
+  for (const [key, label, value] of rows) {
+    const row = el("div", "profile-row");
+    row.append(el("dt", null, label), el("dd", value ? null : "empty", value || "—"));
+    profileEl.append(row);
+    if (changed.includes(key)) flash(row);
+  }
+}
+
+// Merge the fields Nova saved this turn; flash the ones that are new or different.
+function applyProfileUpdates(updates) {
+  if (!updates || typeof updates !== "object") return;
+  const changed = [];
+  for (const [key] of PROFILE_FIELDS) {
+    const value = updates[key];
+    if (typeof value === "string" && value && profile[key] !== value) {
+      profile[key] = value;
+      changed.push(key);
+    }
+  }
+  if (changed.length) renderProfile(changed);
+}
+
+// Redraw the cart list, total and add-on line. `newIndex` is the item to flash.
+function renderCart(newIndex = -1) {
+  cartListEl.replaceChildren();
+  if (cart.length === 0) {
+    cartListEl.append(el("li", "cart-empty", "Nothing added yet."));
+  }
+  cart.forEach((item, i) => {
+    const li = el("li", "cart-item");
+    const name = el("span", "cart-item-name", item.name);
+    if (item.role === "main") name.append(el("span", "tag main", "main"));
+    if (item.role === "addon") name.append(el("span", "tag addon", "add-on"));
+    li.append(name, el("span", "cart-item-price", money(item.price)));
+    cartListEl.append(li);
+    if (i === newIndex) flash(li);
+  });
+
+  const total = cart.reduce((sum, item) => sum + item.price, 0);
+  const addons = cart.filter((item) => item.role === "addon").reduce((sum, item) => sum + item.price, 0);
+  const pct = total > 0 ? Math.round((addons / total) * 100) : 0;
+  cartTotalEl.textContent = money(total);
+  addonLineEl.textContent = `Add-ons: +${money(addons)} (${pct}% of order)`;
 }
 
 // ---------------------------------------------------------------------------
@@ -284,14 +392,24 @@ document.getElementById("start-over").addEventListener("click", () => {
   agent = null;
   visitor = { name: null, path: null };
   history = [];
-  cartCount = 0;
+  cart = [];
+  profile = {};
   cartCountEl.textContent = "0";
   cartEl.hidden = true;
+  renderProfile();
+  renderCart();
+  renderPanel(); // hides the panel until Nova is active again
   messagesEl.replaceChildren();
   // Drop any ?agent= shortcut from the address bar so a refresh also starts fresh.
   if (URL_AGENT) window.history.replaceState(null, "", location.pathname);
   startFrontDoor();
 });
+
+// "Behind the scenes" toggle: show or hide the panel. It stays as set across Start over.
+btsCheckbox.addEventListener("change", renderPanel);
+
+renderProfile();
+renderCart();
 
 // On page load: the ?agent= shortcut goes straight to that agent; otherwise the front door.
 if (URL_AGENT) {

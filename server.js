@@ -2,7 +2,7 @@
 // It does two jobs:
 //   1. Serves the chat web page (the files in /public)
 //   2. Handles POST /api/chat: runs the conversation with Claude (including any
-//      tool calls) and returns { reply, products } to the browser
+//      tool calls) and returns { reply, products, profile_updates } to the browser
 
 import "dotenv/config"; // loads variables from .env into process.env
 import express from "express";
@@ -73,7 +73,46 @@ const PRODUCT_TOOLS = [
       additionalProperties: false,
     },
   },
+  {
+    name: "update_shopper_profile",
+    description:
+      "Save what you've learned about the shopper so the store can tailor recommendations. " +
+      "Call it as soon as you learn any of these details, sending only the fields that are new or changed. " +
+      "Keep each value short (a few words). This is silent: never mention it to the shopper.",
+    input_schema: {
+      type: "object",
+      properties: {
+        room: { type: "string", description: "Which room, e.g. 'living room', 'bedroom'" },
+        lighting: { type: "string", enum: ["bright", "dim", "mixed"], description: "How bright the room is" },
+        main_use: { type: "string", description: "What they'll mostly watch or do, e.g. 'sports and gaming'" },
+        budget: { type: "string", description: "Rough budget for the main item, e.g. 'under $1,000'" },
+        setup: { type: "string", enum: ["wall-mount", "stand"], description: "How the TV will be installed" },
+        current_sound: { type: "string", description: "Their sound today, e.g. 'TV speakers', 'old soundbar'" },
+        viewing_distance: { type: "string", description: "How far they sit from the screen, e.g. '10 ft'" },
+        notes: { type: "string", description: "Anything else worth remembering, e.g. 'has a PS5'" },
+      },
+      additionalProperties: false,
+    },
+  },
 ];
+
+// The shopper-profile fields, and the allowed values for the ones with a fixed list.
+const PROFILE_FIELDS = ["room", "lighting", "main_use", "budget", "setup", "current_sound", "viewing_distance", "notes"];
+const PROFILE_CHOICES = { lighting: ["bright", "dim", "mixed"], setup: ["wall-mount", "stand"] };
+
+// Keep only known fields with sensible text values; anything else is dropped.
+function cleanProfileUpdates(input) {
+  const updates = {};
+  for (const field of PROFILE_FIELDS) {
+    const value = input?.[field];
+    if (typeof value !== "string") continue;
+    const trimmed = value.trim().slice(0, 120);
+    if (!trimmed) continue;
+    if (PROFILE_CHOICES[field] && !PROFILE_CHOICES[field].includes(trimmed)) continue;
+    updates[field] = trimmed;
+  }
+  return updates;
+}
 
 // Per-agent settings. Agents not listed here chat without tools.
 const AGENT_SETTINGS = {
@@ -81,9 +120,16 @@ const AGENT_SETTINGS = {
 };
 const DEFAULT_SETTINGS = { tools: null, effort: "low" }; // quick, chatty replies
 
-// Run one tool call. Returns the text to send back to Claude, and adds any
-// products to show to `cards`. Card data always comes from the catalog itself.
-function runTool(name, input, cards) {
+// Run one tool call. Returns the text to send back to Claude. Products to show
+// are added to `out.cards` (card data always comes from the catalog itself), and
+// shopper-profile changes are merged into `out.profile` (latest value wins).
+function runTool(name, input, out) {
+  const { cards, profile } = out;
+  if (name === "update_shopper_profile") {
+    const updates = cleanProfileUpdates(input);
+    Object.assign(profile, updates);
+    return { content: JSON.stringify({ saved: Object.keys(updates) }) };
+  }
   if (name === "search_products") {
     const results = searchProducts(input);
     return { content: JSON.stringify({ count: results.length, products: results }) };
@@ -191,6 +237,7 @@ app.post("/api/chat", async (req, res) => {
   // Copy the browser's history; tool calls and results get appended to this copy.
   const messages = history.map((m) => ({ role: m.role, content: m.content }));
   const cards = [];
+  const profile = {}; // shopper-profile fields Claude saved during this message
 
   try {
     // The tool-use loop: ask Claude; if it wants tools, run them, send the
@@ -210,7 +257,11 @@ app.post("/api/chat", async (req, res) => {
       });
 
       if (response.stop_reason === "refusal") {
-        return res.json({ reply: "Sorry, I can't help with that. Is there something else I can do for you?", products: [] });
+        return res.json({
+          reply: "Sorry, I can't help with that. Is there something else I can do for you?",
+          products: [],
+          profile_updates: profile,
+        });
       }
 
       if (response.stop_reason !== "tool_use") {
@@ -220,7 +271,7 @@ app.post("/api/chat", async (req, res) => {
           .map((block) => block.text)
           .join("")
           .trim();
-        return res.json({ reply: reply || "Here's what I found.", products: cards });
+        return res.json({ reply: reply || "Here's what I found.", products: cards, profile_updates: profile });
       }
 
       // Claude asked for tools. Add its turn to the conversation unchanged,
@@ -229,7 +280,7 @@ app.post("/api/chat", async (req, res) => {
       const toolResults = response.content
         .filter((block) => block.type === "tool_use")
         .map((block) => {
-          const result = runTool(block.name, block.input, cards);
+          const result = runTool(block.name, block.input, { cards, profile });
           console.log(`[${agent}] tool ${block.name}`, JSON.stringify(block.input));
           return { type: "tool_result", tool_use_id: block.id, ...result };
         });
@@ -237,7 +288,7 @@ app.post("/api/chat", async (req, res) => {
     }
 
     console.error(`[${agent}] stopped after ${MAX_TOOL_ROUNDS} tool rounds`);
-    res.json({ reply: "Sorry, I got a bit tangled up there. Could you rephrase that?", products: cards });
+    res.json({ reply: "Sorry, I got a bit tangled up there. Could you rephrase that?", products: cards, profile_updates: profile });
   } catch (err) {
     // Log details on the server only; don't leak internals to the browser.
     if (err instanceof Anthropic.AuthenticationError) {
