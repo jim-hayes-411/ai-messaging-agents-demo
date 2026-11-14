@@ -377,6 +377,15 @@ function applyProfileUpdates(updates) {
   if (changed.length) renderProfile(changed);
 }
 
+// The × button on a cart line: remove that one item. Nova sees the updated cart with the next message.
+function removeCartItem(index) {
+  cart.splice(index, 1);
+  assignRoles();
+  renderCart();
+  flash(cartTotalEl.parentElement);
+  updateCartCount();
+}
+
 // Take out the items Nova removed: { id: quantity }. The most recently added copies go first.
 function applyCartRemovals(removals) {
   if (!removals || typeof removals !== "object") return;
@@ -407,7 +416,12 @@ function renderCart(newIndex = -1) {
     const name = el("span", "cart-item-name", item.name);
     if (item.role === "main") name.append(el("span", "tag main", "main"));
     if (item.role === "addon") name.append(el("span", "tag addon", "add-on"));
-    li.append(name, el("span", "cart-item-price", money(item.price)));
+    const remove = el("button", "cart-remove", "×");
+    remove.type = "button";
+    remove.title = `Remove ${item.name}`;
+    remove.setAttribute("aria-label", `Remove ${item.name}`);
+    remove.addEventListener("click", () => removeCartItem(i));
+    li.append(name, el("span", "cart-item-price", money(item.price)), remove);
     cartListEl.append(li);
     if (i === newIndex) flash(li);
   });
