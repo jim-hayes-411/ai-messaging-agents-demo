@@ -365,6 +365,18 @@ app.post("/api/chat", async (req, res) => {
   }
 });
 
-app.listen(PORT, () => {
+const server = app.listen(PORT);
+server.on("listening", () => {
   console.log(`Chat demo running at http://localhost:${PORT}`);
+});
+server.on("error", (err) => {
+  if (err.code === "EADDRINUSE") {
+    console.error(
+      `Port ${PORT} is already in use (probably another copy of this server).\n` +
+        `Stop it first, or pick another port, e.g.  PORT=${Number(PORT) + 1} npm start`
+    );
+  } else {
+    console.error("Server failed to start:", err.message);
+  }
+  process.exit(1);
 });
